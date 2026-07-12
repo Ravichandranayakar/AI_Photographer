@@ -1,0 +1,295 @@
+# Research Topic 6: The Guidance Engine (Tri-Engine Architecture)
+
+## Status Check — What Is Already Built
+
+| Engine | EDR Step | File | Status |
+|---|---|---|---|
+| Landmark Validator | Step 1 | `capsule_validator.dart` | ✅ LOCKED |
+| Jitter Filter (1-Euro) | Step 2 | `frozen_euro_filter.dart` | ✅ LOCKED |
+| Normalizer | Step 3 | `landmark_normalizer.dart` | ✅ LOCKED |
+| Silhouette Generator | Step 6 | `engine_b.dart` + `capsule_body.dart` | ✅ LOCKED |
+| **Engine 5: Pose Matcher** | Step 7–9 | `pose_matcher.dart` + `score_smoother.dart` | ✅ LOCKED (minor output extension needed) |
+| **Engine 6: Decision Engine** | Step 10 | **MISSING** | 🔴 BUILD |
+| **Engine 7: Guidance Renderer** | Step 11 | **MISSING** | 🔴 BUILD |
+
+---
+
+## The Tri-Engine Architecture
+
+```
+PoseMatcher.compute(user, target)
+          │
+          ▼
+    [ENGINE 5 OUTPUT]
+    PoseMatchResult
+    { score: 0.61
+      boneScores: {
+        left_humerus:  0.32  ← failing
+        right_humerus: 0.91  ← ok
+        left_femur:    0.88  ← ok
+        pelvis:        0.95  ← ok
+        ...
+      }
+    }
+          │
+          ▼
+  ┌───────────────────┐
+  │   ENGINE 6        │  ← The Coach's Brain
+  │  Decision Engine  │     Motor Learning + FSM
+  └───────────────────┘
+          │
+          ▼
+    [ENGINE 6 OUTPUT]
+    GuidanceSignal
+    { bottleneckBone: "left_humerus"
+      joint: leftElbow
+      correctionDx: -0.15
+      correctionDy: -0.22
+      direction: upLeft
+      isPostureAcceptable: false }
+          │
+          ▼
+  ┌───────────────────┐
+  │   ENGINE 7        │  ← The Visual Layer
+  │ Guidance Renderer │     HCI + Progressive Disclosure
+  └───────────────────┘
+          │
+          ├─► SilhouettePainter → Outline shifts toward target (Priority 1)
+          └─► GuidanceArrowPainter → Single ↖ arrow near joint (Priority 2)
+```
+
+---
+
+## Engine 5: Pose Matcher Extension (Minor Update)
+
+**File:** `lib/engine/matcher/pose_matcher.dart`
+
+**What already exists:** The engine outputs `boneScores` map per bone.
+
+**What we need to add:** Instead of just the bone-level score, Engine 6 needs the **per-joint error vector** — not just HOW BAD a joint is, but WHICH DIRECTION it is wrong.
+
+**Researched Math — Joint Error Vector:**
+```
+For each bone b with score < threshold:
+
+  userJoint   = normalized user landmark (e.g., leftElbow)
+  targetJoint = normalized target landmark (e.g., leftElbow)
+
+  errorDx = targetJoint.x - userJoint.x
+  errorDy = targetJoint.y - userJoint.y
+  errorMagnitude = √(errorDx² + errorDy²)
+```
+
+**New output field to add to `PoseMatchResult`:**
+```dart
+final Map<String, Offset> boneErrorVectors;
+// Key: bone name (e.g., "left_humerus")
+// Value: 2D error vector in normalized coordinates
+```
+
+---
+
+## Engine 6: The Decision Engine (The Coach's Brain)
+
+**File:** `lib/engine/guidance/decision_engine.dart`
+
+This is the most mathematically sophisticated engine. It applies three layers of motor learning research to prevent cognitive overload.
+
+### Layer 1 — Bandwidth Feedback (Error Tolerance Gate)
+**Research Source:** Bandwidth feedback is used in sports science to reduce feedback noise. You only correct a joint if the error is large enough to matter.
+
+**Math:**
+```
+BANDWIDTH_THRESHOLD = 0.12  (in normalized units)
+
+For each failing bone:
+  If errorMagnitude < BANDWIDTH_THRESHOLD:
+    IGNORE this bone.  ← It is close enough. Don't distract the user.
+  Else:
+    This bone is a candidate for correction.
+```
+
+This means if your elbow is only 5 pixels off the target, the engine stays silent. It only speaks when the error is significant.
+
+### Layer 2 — Temporal Stability (Finite State Machine)
+**Research Source:** FSM Hysteresis is used in motor learning systems to prevent the coaching instruction from changing every frame. If your engine promotes "fix left elbow" and then the very next frame promotes "fix right knee", the user gets confused.
+
+**Math (Hysteresis FSM):**
+```
+PROMOTE_THRESHOLD  = 0.60  ← A bone must be THIS bad to become the bottleneck
+DEMOTE_THRESHOLD   = 0.80  ← Current bottleneck is only released when it reaches THIS good
+
+State Machine:
+  currentBottleneck = null (initial state)
+
+  Each frame:
+    If currentBottleneck == null:
+      Find worst bone with score < PROMOTE_THRESHOLD
+      Set as currentBottleneck
+
+    Else:
+      If currentBottleneck.score > DEMOTE_THRESHOLD:
+        Release it (null) → find the next worst bone
+      Else:
+        Keep the same instruction. Do NOT switch.
+```
+
+This ensures the arrow stays pointing at ONE joint long enough for the user to actually react and move.
+
+### Layer 3 — Utility Sorting (Kinematic Priority)
+**Research Source:** Anatomical kinematic hierarchy — it makes no sense to tell the user "fix your wrist" if their entire spine is broken.
+
+**Math:**
+```
+Utility Score = (1.0 - boneScore) × boneKinematicWeight
+
+  Core bones   (weight 0.5) → always promoted above secondary
+  Primary bones (weight 0.3) → promoted after core is fixed
+  Secondary bones (weight 0.2) → only coached once primary is good
+
+Sort all candidate bones by Utility Score (descending).
+Pick index [0] = The Bottleneck.
+```
+
+**Example:**
+```
+left_humerus:  score=0.32, weight=0.3 → Utility = (1-0.32)*0.3 = 0.204
+pelvis:        score=0.60, weight=0.5 → Utility = (1-0.60)*0.5 = 0.200
+left_forearm:  score=0.20, weight=0.2 → Utility = (1-0.20)*0.2 = 0.160
+
+Winner: left_humerus (Utility 0.204) ← Even though left_forearm is worse (0.20),
+        left_humerus is promoted because its kinematic weight matters.
+```
+
+### Engine 6 Final Output (`GuidanceSignal`)
+```dart
+class GuidanceSignal {
+  final String bottleneckBoneName;       // "left_humerus"
+  final PoseLandmarkType bottleneckJoint; // leftElbow
+  final double correctionDx;             // Target - User in normalized space
+  final double correctionDy;
+  final double errorMagnitude;           // √(dx²+dy²)
+  final CorrectionDirection direction;   // UP / DOWN / LEFT / RIGHT etc.
+  final bool isPostureAcceptable;        // true if score >= 0.85
+}
+
+enum CorrectionDirection {
+  up, down, left, right,
+  upLeft, upRight, downLeft, downRight
+}
+```
+
+**Direction calculation:**
+```dart
+final angle = math.atan2(correctionDy, correctionDx) * 180 / math.pi;
+
+// Snap to 8-directional compass:
+//  -45° to  45°  → right
+//   45° to 135°  → down
+// -135° to -45°  → up
+//  135° to 180°  or -180° to -135° → left
+// Diagonals at the boundaries
+```
+
+---
+
+## Engine 7: The Guidance Renderer (The Visual Layer)
+
+Two new painters that receive `GuidanceSignal` and draw the visual cues.
+
+### Priority 1 — Silhouette Shift (Update `silhouette_painter.dart`)
+**HCI Research:** "Feedforward" — showing the user where to GO is more effective than showing them what they did WRONG. The glowing outline of the failing limb drifts slightly toward where that limb is SUPPOSED to be.
+
+**Implementation:**
+```dart
+// When GuidanceSignal is available and isPostureAcceptable == false:
+// Apply a subtle translation offset to the WHOLE path in the direction
+// of the correction vector, scaled to a max of 20 screen pixels.
+
+final double maxShift = 20.0;
+final shiftX = correctionDx.clamp(-1.0, 1.0) * maxShift;
+final shiftY = correctionDy.clamp(-1.0, 1.0) * maxShift;
+
+final matrix = Matrix4.identity()..translate(shiftX, shiftY);
+final shiftedPath = basePath.transform(matrix.storage);
+```
+
+The user's instinct is to "step inside the glowing shape." This is Apple Fitness+ Level UX.
+
+### Priority 2 — Arrow Painter (New `guidance_arrow_painter.dart`)
+**HCI Research:** Visual saliency — the arrow must be obvious but not distracting. Single pulsing arrow near the joint.
+
+**Visual Design:**
+```
+Arrow properties:
+  Position: Screen coordinates of bottleneckJoint (e.g., leftElbow pixel position)
+  Direction: Based on CorrectionDirection enum
+  Style:
+    - White stroke, same glow aesthetic as the doodle outline
+    - Animated pulse (opacity oscillates 0.6 → 1.0 at 1.5Hz)
+    - Arrow length: 32px
+    - Arrowhead: Filled triangle (8px)
+  Disappears: When isPostureAcceptable == true
+```
+
+---
+
+## New Files to Create
+
+```
+lib/engine/guidance/
+  ├── guidance_signal.dart         ← Data model (Engine 6 output)
+  ├── decision_engine.dart         ← Engine 6 math (Bandwidth + FSM + Utility)
+  └── guidance_arrow_painter.dart  ← Engine 7 Priority 2 visual
+
+lib/engine/matcher/
+  └── pose_matcher.dart            ← Add boneErrorVectors to PoseMatchResult
+
+lib/engine/models/
+  └── pose_match_result.dart       ← Add boneErrorVectors field
+
+research/06_guidance/
+  └── evaluate_topic_6.dart        ← Offline benchmark script
+```
+
+---
+
+## Build Order
+
+1. **`guidance_signal.dart`** — Data model, no logic.
+2. **Extend `pose_match_result.dart`** — Add `boneErrorVectors` map.
+3. **Extend `pose_matcher.dart`** — Populate `boneErrorVectors` during compute.
+4. **`decision_engine.dart`** — Engine 6 (Bandwidth Gate → FSM → Utility Sort).
+5. **`research/06_guidance/evaluate_topic_6.dart`** — Offline test with mock data.
+6. **`guidance_arrow_painter.dart`** — Engine 7 Priority 2 arrow.
+7. **Update `silhouette_painter.dart`** — Engine 7 Priority 1 outline shift.
+
+---
+
+## Verification Plan
+
+### Offline Research Script Test
+```
+Mock Input:
+  boneScores = {
+    pelvis: 0.95,
+    left_humerus: 0.32,   ← worst core-tier bone
+    left_forearm: 0.18,   ← worse raw score but lower tier weight
+    right_humerus: 0.91,
+    ...
+  }
+
+Expected Output:
+  bottleneck = "left_humerus"   ← Utility sorting wins over raw score
+  direction = UP (because target elbow is above user)
+  isPostureAcceptable = false
+```
+
+### Live Device Test
+1. Load "T-Pose" (arms horizontal) as target.
+2. Stand with arms DOWN.
+3. **Expected:** Arrow appears near elbow pointing UP. Outline drifts upward.
+4. Raise one arm to T-pose level.
+5. **Expected:** Arrow switches to OTHER arm's elbow automatically (FSM released old bottleneck).
+6. Raise both arms.
+7. **Expected:** Arrow disappears. Score > 0.85. `isPostureAcceptable = true`.
