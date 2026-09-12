@@ -79,7 +79,7 @@ The foundational architecture of the Frozen Intelligence Engine is complete and 
 - Engine B (Capsule Math + CSG Boolean geometry) is fully deployed. The app successfully renders a smooth, non-intersecting, glowing holographic body path and perfectly tracks the user's movements in real time.
 - The core camera state machine correctly handles transitions between "No Person Detected," "Searching," and "Pose Matched."
 
-## What We Are Building Next (The Roadmap)
+## What We Are Building Next
 Now that the core mathematical engine is locked and the hologram is flawlessly rendering, we are shifting focus to the product layer and hackathon deliverables:
 
 1. **RevenueCat Integration :** Implementing a robust paywall and subscription infrastructure using RevenueCat, likely gating premium pose collections or advanced coaching metrics.
