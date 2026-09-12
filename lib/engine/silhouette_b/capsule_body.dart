@@ -399,12 +399,20 @@ class CapsuleBody {
       }
     }
 
-    // 11. Hip span
-    addCap(lHip, rHip, LandmarkIdx.leftHip, LandmarkIdx.rightHip, 'hip');
+    // 11. Hip span — ONLY draw if legs are visible.
+    // In half-body frame: knees are not detected (low confidence).
+    // Drawing the hip-span capsule would create an unnatural
+    // horizontal bar closing the bottom of the torso.
+    // When legs are invisible, leave the bottom OPEN — the torso
+    // sides naturally extend downward off the edge of the screen.
+    final legsVisible = (conf(LandmarkIdx.leftKnee) >= minConfidence ||
+        conf(LandmarkIdx.rightKnee) >= minConfidence);
+    if (legsVisible) {
+      addCap(lHip, rHip, LandmarkIdx.leftHip, LandmarkIdx.rightHip, 'hip');
+    }
 
-    // 11b. Groin Bridge (Mathematically Correct Adaptive Topology)
-    // Prevents the sharp V-shape crotch artifact by filling the gap with a U-shape.
-    if (lKn != null && rKn != null && lHip != null && rHip != null) {
+    // 11b. Groin Bridge — only when legs are visible (same guard as hip span above)
+    if (legsVisible && lKn != null && rKn != null && lHip != null && rHip != null) {
       final ci = (avgConf(LandmarkIdx.leftHip, LandmarkIdx.rightHip) +
               avgConf(LandmarkIdx.leftKnee, LandmarkIdx.rightKnee)) / 2.0;
 

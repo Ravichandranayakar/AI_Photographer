@@ -1,10 +1,21 @@
 import 'package:flutter/foundation.dart';
 
+import '../guidance/joint_error.dart';
+
 /// The output of a single pose match computation from [PoseMatcher].
 ///
-/// Contains the aggregated total score and granular per-bone data,
-/// enabling both the Pose Score Engine (overall feedback) and the
-/// Guidance Engine (per-joint coaching indicators) to operate independently.
+/// Contains the aggregated total score, per-bone similarity scores, and
+/// the full [Pose Error Model] ([boneErrors]) enabling the Guidance Engine
+/// (Engine 6) to calculate the Bottleneck joint and correction vector.
+///
+/// ─────────────────────────────────────────────────────────────────────────
+/// EDR DECISION — Research Topic 06: Guidance Engine
+/// ─────────────────────────────────────────────────────────────────────────
+///
+/// The [boneErrors] map is the contract between Engine 5 (Pose Comparison)
+/// and Engine 6 (Decision Engine). Engine 5 populates it. Engine 6 reads it.
+/// Neither Engine 7 nor the UI should ever access [boneErrors] directly.
+/// ─────────────────────────────────────────────────────────────────────────
 @immutable
 class PoseMatchResult {
   /// The overall pose similarity score, clamped to [0.0 – 1.0].
@@ -21,6 +32,18 @@ class PoseMatchResult {
   ///        0.0 means either a terrible match, OR the bone was confidence-gated.
   final Map<String, double> boneScores;
 
+  /// The Pose Error Model — mathematical error vectors for every bone.
+  ///
+  /// Key: [BoneDefinition.name] (e.g., 'left_humerus').
+  /// Value: [JointError] containing dx, dy, distance, confidence, frameIndex.
+  ///
+  /// This is the primary input to Engine 6 (Decision Engine). It carries
+  /// not just HOW BAD a joint is, but exactly WHICH DIRECTION and HOW FAR
+  /// it needs to move to reach the target pose.
+  ///
+  /// Will be an empty map if the frame was fully confidence-gated.
+  final Map<String, JointError> boneErrors;
+
   /// The sum of (weight * confidence) for all bones that passed the
   /// confidence gate in this frame.
   ///
@@ -31,6 +54,7 @@ class PoseMatchResult {
   const PoseMatchResult({
     required this.score,
     required this.boneScores,
+    required this.boneErrors,
     required this.effectiveWeight,
   });
 
@@ -41,6 +65,8 @@ class PoseMatchResult {
   @override
   String toString() =>
       'PoseMatchResult(score: ${(score * 100).toStringAsFixed(1)}%, '
+      'bones: ${boneScores.length}, '
+      'errors: ${boneErrors.length}, '
       'effectiveWeight: ${effectiveWeight.toStringAsFixed(3)}, '
       'reliable: $isReliable)';
 }

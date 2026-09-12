@@ -1,14 +1,3 @@
-// ============================================================
-// Engine B Flutter Adapter — engine_b_adapter.dart
-// ============================================================
-// Bridges the research Engine B prototype with the Flutter app.
-//
-// Converts google_mlkit_pose_detection PoseLandmark
-//   → RawLandmark (engine_b format)
-//   → EngineBResult
-//   → SilhouetteResult (for SilhouettePainter, no painter changes needed)
-// ============================================================
-
 import 'silhouette/vec2.dart';
 import 'silhouette/silhouette_engine.dart';
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
@@ -18,6 +7,7 @@ import 'silhouette_b/capsule_body.dart' show RawLandmark, CapsuleBody;
 import 'silhouette_b/engine_b.dart' show EngineB;
 import 'silhouette_b/contour/v2_csg/csg_extractor.dart';
 import 'silhouette_b/capsule_validator.dart';
+import 'models/frozen_landmark.dart';
 
 // ──────────────────────────────────────────────────────────────
 // VERSION FLAG — flip to switch between Engine B v1 and v2 CSG.
@@ -94,8 +84,96 @@ class EngineBAdapter {
     // Apply EMA temporal smoothing to coordinates and confidence
     rawMap = CapsuleValidator.smoothLandmarks(rawMap);
 
-    // ── Step 2: Build capsule skeleton (same for v1 and v2) ───────────────
+    return _runEngineB(rawMap, torsoPx);
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // TARGET POSE GHOST — Engine B on denormalized FrozenLandmarks
+  // ─────────────────────────────────────────────────────────────────────────
+  //
+  // PURPOSE:
+  //   Runs the SAME Engine B capsule pipeline on the selected target pose,
+  //   but with the pose rescaled to the USER's body size and anchored at the
+  //   user's real hip position on screen.
+  //
+  // MATH:
+  //   FrozenLandmark (x, y) are normalized to torso-length units, centered at
+  //   mid-hip. To convert back to pixel space:
+  //
+  //     pixelX = anchorPxX + (lm.x * torsoPx)
+  //     pixelY = anchorPxY + (lm.y * torsoPx)
+  //
+  //   where anchorPxX/Y = mid-hip pixel position from the live camera frame.
+  //
+  // RESULT:
+  //   The same SilhouetteResult format as the live silhouette, but shaped to
+  //   the target pose at the user's body scale — ready to draw with the
+  //   ghost-style cyan painter.
+  // ─────────────────────────────────────────────────────────────────────────
+  static SilhouetteResult processTargetPose({
+    required Map<PoseLandmarkType, FrozenLandmark> targetPose,
+    required double anchorPxX,   // mid-hip X in ML Kit pixel space
+    required double anchorPxY,   // mid-hip Y in ML Kit pixel space
+    required double torsoPx,     // user's live torso length in pixels
+    required double imageHeight, // ML Kit image height (for clamping)
+    bool mirrorX = false,        // If true, flip the pose horizontally (for front camera)
+  }) {
     if (torsoPx < 10.0) return SilhouetteResult.empty();
+
+    // Denormalize: FrozenLandmark (normalized) → RawLandmark (pixel space)
+    final rawMap = <int, RawLandmark>{};
+    for (final entry in targetPose.entries) {
+      final idx = _mlkitToIdx[entry.key];
+      if (idx == null) continue;
+      final lm = entry.value;
+      
+      double confidence = lm.likelihood;
+
+      // Re-project into pixel space using user's anchor + scale
+      // If mirrored (front camera), invert the X offset so the pose visually matches the thumbnail
+      final px = anchorPxX + (mirrorX ? -lm.x : lm.x) * torsoPx;
+      final py = anchorPxY + (lm.y * torsoPx);
+      rawMap[idx] = RawLandmark(px, py, confidence);
+    }
+
+    // Run same Engine B pipeline (NO EMA smoothing — target is static)
+    return _runEngineB(rawMap, torsoPx);
+  }
+
+
+  // ── Shared Engine B runner ─────────────────────────────────────────────────
+  static SilhouetteResult _runEngineB(Map<int, RawLandmark> rawMap, double torsoPx) {
+    if (torsoPx < 10.0) return SilhouetteResult.empty();
+
+    // ── Half-Body Pose / Invisible Legs Heuristic ────────────────────────
+    // If the knee confidence is extremely low (< 0.2), ML Kit is just wildly 
+    // guessing its location (often squishing it unnaturally close to the hip).
+    // In this case, we force the confidence of the entire leg to 0.0 so Engine B 
+    // skips the leg capsules entirely, creating a clean "open" bottom edge.
+    void killLeg(int kneeIdx, int ankleIdx, int heelIdx, int footIdx) {
+      if ((rawMap[kneeIdx]?.confidence ?? 0) < 0.2) {
+        if (rawMap.containsKey(kneeIdx)) rawMap[kneeIdx] = RawLandmark(rawMap[kneeIdx]!.x, rawMap[kneeIdx]!.y, 0.0);
+        if (rawMap.containsKey(ankleIdx)) rawMap[ankleIdx] = RawLandmark(rawMap[ankleIdx]!.x, rawMap[ankleIdx]!.y, 0.0);
+        if (rawMap.containsKey(heelIdx)) rawMap[heelIdx] = RawLandmark(rawMap[heelIdx]!.x, rawMap[heelIdx]!.y, 0.0);
+        if (rawMap.containsKey(footIdx)) rawMap[footIdx] = RawLandmark(rawMap[footIdx]!.x, rawMap[footIdx]!.y, 0.0);
+      }
+    }
+    
+    killLeg(
+      _mlkitToIdx[PoseLandmarkType.leftKnee]!,
+      _mlkitToIdx[PoseLandmarkType.leftAnkle]!,
+      _mlkitToIdx[PoseLandmarkType.leftHeel]!,
+      _mlkitToIdx[PoseLandmarkType.leftFootIndex]!,
+    );
+    
+    killLeg(
+      _mlkitToIdx[PoseLandmarkType.rightKnee]!,
+      _mlkitToIdx[PoseLandmarkType.rightAnkle]!,
+      _mlkitToIdx[PoseLandmarkType.rightHeel]!,
+      _mlkitToIdx[PoseLandmarkType.rightFootIndex]!,
+    );
+
+    // ── Step 2: Build capsule skeleton (same for v1 and v2) ───────────────
 
     // ── v2 CSG branch ───────────────────────────────────────────────
     if (kUseV2Csg) {
@@ -136,8 +214,6 @@ class EngineBAdapter {
     }
 
     // ── Step 3: Convert Engine B Vec2 → lib Vec2 for SilhouetteResult ─────
-    // Engine B uses its own Vec2 from capsule.dart (same structure, different file).
-    // We copy x/y into the lib/engine/silhouette/vec2.dart Vec2 type.
     final libPath = result.path.map((p) => Vec2(p.x, p.y)).toList();
 
     return SilhouetteResult(
@@ -148,3 +224,4 @@ class EngineBAdapter {
     );
   }
 }
+

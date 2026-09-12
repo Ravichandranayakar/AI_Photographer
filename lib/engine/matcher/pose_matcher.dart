@@ -2,6 +2,7 @@ import 'dart:math' as math;
 
 import 'package:google_mlkit_pose_detection/google_mlkit_pose_detection.dart';
 
+import '../guidance/joint_error.dart';
 import '../models/bone_registry.dart';
 import '../models/frozen_landmark.dart';
 import '../models/pose_match_result.dart';
@@ -83,6 +84,12 @@ abstract final class PoseMatcher {
     double weightedScoreNumerator = 0.0;
     double weightedScoreDenominator = 0.0;
     final Map<String, double> boneScores = {};
+    final Map<String, JointError> boneErrors = {};
+    // Frame index is managed externally by the camera pipeline.
+    // We accept it as a parameter so Engine 6 can do temporal reasoning.
+    final int frameIndex = DateTime.now().microsecondsSinceEpoch;
+    // TODO(topic06): Replace with a real monotonic frame counter passed from
+    // the camera pipeline. Using microsecondsSinceEpoch as a V1 approximation.
 
     for (final BoneDefinition bone in BoneRegistry.all) {
       // ── Fetch normalized landmarks for this bone ────────────────────────────
@@ -97,6 +104,7 @@ abstract final class PoseMatcher {
           targetStart == null ||
           targetEnd == null) {
         boneScores[bone.name] = 0.0;
+        // No boneError entry for absent landmarks — Engine 6 handles missing keys.
         continue;
       }
 
@@ -108,6 +116,7 @@ abstract final class PoseMatcher {
       // Excise bone from scoring if confidence is below threshold τ.
       if (boneConfidence < _confidenceThreshold) {
         boneScores[bone.name] = 0.0;
+        // No boneError entry for low-confidence bones — Engine 6 skips missing keys.
         continue;
       }
 
@@ -126,6 +135,7 @@ abstract final class PoseMatcher {
       // Degenerate case: one of the vectors is zero-length. Skip this bone.
       if (rawCosine.isNaN) {
         boneScores[bone.name] = 0.0;
+        // No boneError for degenerate bones.
         continue;
       }
 
@@ -139,6 +149,19 @@ abstract final class PoseMatcher {
       weightedScoreNumerator += effectiveBoneWeight * normalizedSimilarity;
       weightedScoreDenominator += effectiveBoneWeight;
       boneScores[bone.name] = normalizedSimilarity;
+
+      // ── Pose Error Model (Engine 5 → Engine 6 contract) ──────────────────
+      // Compute the correction vector using the DISTAL (far end) joint.
+      // e.g. for left_humerus, the distal joint is leftElbow.
+      final double dx = targetEnd.x - userEnd.x;
+      final double dy = targetEnd.y - userEnd.y;
+      boneErrors[bone.name] = JointError.fromVector(
+        joint: bone.endLandmark,
+        dx: dx,
+        dy: dy,
+        confidence: boneConfidence,
+        frameIndex: frameIndex,
+      );
     }
 
     // ── Guard: Division by zero (user completely off-screen) ─────────────────
@@ -158,6 +181,7 @@ abstract final class PoseMatcher {
     return PoseMatchResult(
       score: userFacingScore,
       boneScores: Map.unmodifiable(boneScores),
+      boneErrors: Map.unmodifiable(boneErrors),
       effectiveWeight: weightedScoreDenominator,
     );
   }
