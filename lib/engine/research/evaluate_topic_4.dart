@@ -75,8 +75,4 @@ void main() async {
   var t8 = await loadLogs('test_4_8_utf8.jsonl');
   List<double> t8HipX = t8.map((l) => (l['landmarks']?['leftHip']?['x'] ?? 0.0) as double).where((v) => v != 0.0).toList();
   print("Test 8 (Distance): Core (Hip) Variance = ${calcVariance(t8HipX).toStringAsFixed(6)} (Scale resilience)");
-
-  print("\n==================================================");
-  print("ALL TESTS EVALUATED. COPY/PASTE TO AI ARCHITECT.");
-  print("==================================================");
 }
